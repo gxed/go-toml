@@ -14,11 +14,9 @@ import (
 )
 
 type tomlParser struct {
-	flowIdx       int
-	flow          []token
-	tree          *Tree
-	currentTable  []string
-	seenTableKeys []string
+	flowIdx int
+	flow    []token
+	builder builder
 }
 
 type tomlParserStateFn func() tomlParserStateFn
@@ -90,46 +88,12 @@ func (p *tomlParser) parseGroupArray() tomlParserStateFn {
 		p.raiseError(key, "unexpected token %s, was expecting a table array key", key)
 	}
 
-	// get or create table array element at the indicated part in the path
 	keys, err := parseKey(key.val)
 	if err != nil {
 		p.raiseError(key, "invalid table array key: %s", err)
 	}
-	p.tree.createSubTree(keys[:len(keys)-1], startToken.Position) // create parent entries
-	destTree := p.tree.GetPath(keys)
-	var array []*Tree
-	if destTree == nil {
-		array = make([]*Tree, 0)
-	} else if target, ok := destTree.([]*Tree); ok && target != nil {
-		array = destTree.([]*Tree)
-	} else {
-		p.raiseError(key, "key %s is already assigned and not of type table array", key)
-	}
-	p.currentTable = keys
 
-	// add a new tree to the end of the table array
-	newTree := newTree()
-	newTree.position = startToken.Position
-	array = append(array, newTree)
-	p.tree.SetPath(p.currentTable, array)
-
-	// remove all keys that were children of this table array
-	prefix := key.val + "."
-	found := false
-	for ii := 0; ii < len(p.seenTableKeys); {
-		tableKey := p.seenTableKeys[ii]
-		if strings.HasPrefix(tableKey, prefix) {
-			p.seenTableKeys = append(p.seenTableKeys[:ii], p.seenTableKeys[ii+1:]...)
-		} else {
-			found = (tableKey == key.val)
-			ii++
-		}
-	}
-
-	// keep this key name from use by other kinds of assignments
-	if !found {
-		p.seenTableKeys = append(p.seenTableKeys, key.val)
-	}
+	p.builder.enterGroupArray(key.val, keys, &startToken.Position)
 
 	// move to next parser state
 	p.assume(tokenDoubleRightBracket)
@@ -142,22 +106,15 @@ func (p *tomlParser) parseGroup() tomlParserStateFn {
 	if key.typ != tokenKeyGroup {
 		p.raiseError(key, "unexpected token %s, was expecting a table key", key)
 	}
-	for _, item := range p.seenTableKeys {
-		if item == key.val {
-			p.raiseError(key, "duplicated tables")
-		}
-	}
 
-	p.seenTableKeys = append(p.seenTableKeys, key.val)
 	keys, err := parseKey(key.val)
 	if err != nil {
 		p.raiseError(key, "invalid table array key: %s", err)
 	}
-	if err := p.tree.createSubTree(keys, startToken.Position); err != nil {
-		p.raiseError(key, "%s", err)
-	}
+
+	p.builder.enterGroup(key.val, keys, &startToken.Position)
+
 	p.assume(tokenRightBracket)
-	p.currentTable = keys
 	return p.parseStart
 }
 
@@ -165,47 +122,12 @@ func (p *tomlParser) parseAssign() tomlParserStateFn {
 	key := p.getToken()
 	p.assume(tokenEqual)
 
-	value := p.parseRvalue()
-	var tableKey []string
-	if len(p.currentTable) > 0 {
-		tableKey = p.currentTable
-	} else {
-		tableKey = []string{}
-	}
+	p.builder.enterAssign(key.val, &key.Position)
 
-	// find the table to assign, looking out for arrays of tables
-	var targetNode *Tree
-	switch node := p.tree.GetPath(tableKey).(type) {
-	case []*Tree:
-		targetNode = node[len(node)-1]
-	case *Tree:
-		targetNode = node
-	default:
-		p.raiseError(key, "Unknown table type for path: %s",
-			strings.Join(tableKey, "."))
-	}
+	p.parseRvalue()
 
-	// assign value to the found table
-	keyVals := []string{key.val}
-	if len(keyVals) != 1 {
-		p.raiseError(key, "Invalid key")
-	}
-	keyVal := keyVals[0]
-	localKey := []string{keyVal}
-	finalKey := append(tableKey, keyVal)
-	if targetNode.GetPath(localKey) != nil {
-		p.raiseError(key, "The following key was defined twice: %s",
-			strings.Join(finalKey, "."))
-	}
-	var toInsert interface{}
+	// p.exitAssign() TODO: maybe?
 
-	switch value.(type) {
-	case *Tree, []*Tree:
-		toInsert = value
-	default:
-		toInsert = &tomlValue{value: value, position: key.Position}
-	}
-	targetNode.values[keyVal] = toInsert
 	return p.parseStart
 }
 
@@ -239,17 +161,23 @@ func (p *tomlParser) parseRvalue() interface{} {
 
 	switch tok.typ {
 	case tokenString:
+		p.builder.foundValue(tok.val, &tok.Position)
 		return tok.val
 	case tokenTrue:
+		p.builder.foundValue(true, &tok.Position)
 		return true
 	case tokenFalse:
+		p.builder.foundValue(false, &tok.Position)
 		return false
 	case tokenInf:
 		if tok.val[0] == '-' {
+			p.builder.foundValue(math.Inf(-1), &tok.Position)
 			return math.Inf(-1)
 		}
+		p.builder.foundValue(math.Inf(1), &tok.Position)
 		return math.Inf(1)
 	case tokenNan:
+		p.builder.foundValue(math.NaN(), &tok.Position)
 		return math.NaN()
 	case tokenInteger:
 		cleanedVal := cleanupNumberToken(tok.val)
@@ -288,6 +216,7 @@ func (p *tomlParser) parseRvalue() interface{} {
 		if err != nil {
 			p.raiseError(tok, "%s", err)
 		}
+		p.builder.foundValue(val, &tok.Position)
 		return val
 	case tokenFloat:
 		err := numberContainsInvalidUnderscore(tok.val)
@@ -299,17 +228,20 @@ func (p *tomlParser) parseRvalue() interface{} {
 		if err != nil {
 			p.raiseError(tok, "%s", err)
 		}
+		p.builder.foundValue(val, &tok.Position)
 		return val
 	case tokenDate:
 		val, err := time.ParseInLocation(time.RFC3339Nano, tok.val, time.UTC)
 		if err != nil {
 			p.raiseError(tok, "%s", err)
 		}
+		p.builder.foundValue(val, &tok.Position)
 		return val
 	case tokenLeftBracket:
-		return p.parseArray()
+		p.parseArray()
+		return nil
 	case tokenLeftCurlyBrace:
-		return p.parseInlineTable()
+		return p.parseInlineTable() // TODO: next up
 	case tokenEqual:
 		p.raiseError(tok, "cannot have multiple equals for the same key")
 	case tokenError:
@@ -326,7 +258,7 @@ func tokenIsComma(t *token) bool {
 }
 
 func (p *tomlParser) parseInlineTable() *Tree {
-	tree := newTree()
+	p.builder.enterInlineTable()
 	var previous *token
 Loop:
 	for {
@@ -365,9 +297,9 @@ Loop:
 	return tree
 }
 
-func (p *tomlParser) parseArray() interface{} {
-	var array []interface{}
-	arrayType := reflect.TypeOf(nil)
+func (p *tomlParser) parseArray() {
+	p.builder.enterArray()
+
 	for {
 		follow := p.peek()
 		if follow == nil || follow.typ == tokenEOF {
@@ -377,14 +309,9 @@ func (p *tomlParser) parseArray() interface{} {
 			p.getToken()
 			break
 		}
-		val := p.parseRvalue()
-		if arrayType == nil {
-			arrayType = reflect.TypeOf(val)
-		}
-		if reflect.TypeOf(val) != arrayType {
-			p.raiseError(follow, "mixed types in array")
-		}
-		array = append(array, val)
+
+		p.parseRvalue()
+
 		follow = p.peek()
 		if follow == nil || follow.typ == tokenEOF {
 			p.raiseError(follow, "unterminated array")
@@ -396,32 +323,18 @@ func (p *tomlParser) parseArray() interface{} {
 			p.getToken()
 		}
 	}
-	// An array of Trees is actually an array of inline
-	// tables, which is a shorthand for a table array. If the
-	// array was not converted from []interface{} to []*Tree,
-	// the two notations would not be equivalent.
-	if arrayType == reflect.TypeOf(newTree()) {
-		tomlArray := make([]*Tree, len(array))
-		for i, v := range array {
-			tomlArray[i] = v.(*Tree)
-		}
-		return tomlArray
-	}
-	return array
+	p.builder.exitArray()
 }
 
 func parseToml(flow []token) *Tree {
-	result := newTree()
-	result.position = Position{1, 1}
+	builder := makeTreeBuilder()
 	parser := &tomlParser{
-		flowIdx:       0,
-		flow:          flow,
-		tree:          result,
-		currentTable:  make([]string, 0),
-		seenTableKeys: make([]string, 0),
+		flowIdx: 0,
+		flow:    flow,
+		builder: builder,
 	}
 	parser.run()
-	return result
+	return builder.tree
 }
 
 func init() {
