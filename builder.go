@@ -2,8 +2,8 @@ package toml
 
 import (
 	"fmt"
-	"strings"
 	"reflect"
+	"strings"
 )
 
 type builder interface {
@@ -11,29 +11,30 @@ type builder interface {
 	enterGroup(key string, keys []string, position *Position)      // TODO: keep just one
 	enterAssign(key string, position *Position)
 	foundValue(value interface{}, position *Position)
+
 	enterArray()
 	exitArray()
+
 	enterInlineTable()
+	exitInlineTable()
 }
 
 type treeBuilder struct {
-	tree          *Tree
+	tree          *Tree // points to the root of the tree
 	currentTable  []string
 	seenTableKeys []string
 
-	assignKeyVal string // TODO: probably don't need me, and at least needs a better name
+	assignKey      string   // TODO: probably don't need me, and at least needs a better name
 	assignPosition Position // TODO: same
-	assignTree *Tree
+	currentTree    *Tree    // points to the current tree being built
 
-	inArray bool
-	array []interface{}
+	inArray   bool
+	array     []interface{}
 	arrayType reflect.Type
-
-	inlineTableTree *Tree
 }
 
 func makeTreeBuilder() *treeBuilder {
-	tree := newTree()
+	tree := newTree(nil)
 	tree.position = Position{1, 1}
 	return &treeBuilder{
 		tree:          tree,
@@ -48,8 +49,13 @@ func (b *treeBuilder) raiseError(position *Position, msg string, args ...interfa
 
 func (b *treeBuilder) enterGroupArray(key string, keys []string, position *Position) {
 	// get or create table array element at the indicated part in the path
-	b.tree.createSubTree(keys[:len(keys)-1], *position) // TODO: pass by pointer to avoid copy
+	parentTree, err := b.tree.createSubTree(keys[:len(keys)-1], *position) // TODO: pass by pointer to avoid copy
+	if err != nil {
+		b.raiseError(position, err.Error())
+	}
+
 	destTree := b.tree.GetPath(keys)
+
 	var array []*Tree
 	if destTree == nil {
 		array = make([]*Tree, 0)
@@ -61,10 +67,11 @@ func (b *treeBuilder) enterGroupArray(key string, keys []string, position *Posit
 	b.currentTable = keys
 
 	// add a new tree to the end of the table array
-	newTree := newTree()
+	newTree := newTree(parentTree)
 	newTree.position = *position
 	array = append(array, newTree)
 	b.tree.SetPath(b.currentTable, array)
+	b.currentTree = newTree
 
 	// remove all keys that were children of this table array
 	prefix := key + "."
@@ -94,47 +101,25 @@ func (b *treeBuilder) enterGroup(key string, keys []string, position *Position) 
 
 	b.seenTableKeys = append(b.seenTableKeys, key)
 
-	if err := b.tree.createSubTree(keys, *position); err != nil {
+	newTree, err := b.tree.createSubTree(keys, *position)
+
+	if err != nil {
 		b.raiseError(position, "%s", err)
 	}
 
+	b.currentTree = newTree
 	b.currentTable = keys
 }
 
 func (b *treeBuilder) enterAssign(key string, position *Position) {
 	b.assignPosition = *position
 
-	var tableKey []string
-	if len(b.currentTable) > 0 {
-		tableKey = b.currentTable
-	} else {
-		tableKey = []string{}
-	}
-
-	// find the table to assign, looking out for arrays of tables
-	var targetNode *Tree
-	switch node := b.tree.GetPath(tableKey).(type) {
-	case []*Tree:
-		targetNode = node[len(node)-1]
-	case *Tree:
-		targetNode = node
-	default:
-		b.raiseError(position, "Unknown table type for path: %s", strings.Join(tableKey, "."))
-	}
-
-	keyVals := []string{b.assignKeyVal}
-	if len(keyVals) != 1 { // TODO: this test is suspicious
-		b.raiseError(position, "Invalid key")
-	}
-	keyVal := keyVals[0]
-	localKey := []string{keyVal}
-	finalKey := append(tableKey, keyVal)
-	if targetNode.GetPath(localKey) != nil {
+	if b.currentTree.values[key] != nil {
+		finalKey := append(b.currentTable, key)
 		b.raiseError(position, "The following key was defined twice: %s", strings.Join(finalKey, "."))
 	}
 
-	b.assignKeyVal = keyVal
-	b.assignTree = targetNode
+	b.assignKey = key
 }
 
 func (b *treeBuilder) foundValue(value interface{}, position *Position) {
@@ -156,7 +141,7 @@ func (b *treeBuilder) foundValue(value interface{}, position *Position) {
 	default:
 		toInsert = &tomlValue{value: value, position: b.assignPosition}
 	}
-	b.assignTree.values[b.assignKeyVal] = toInsert
+	b.assignTree.values[b.assignKey] = toInsert
 }
 
 func (b *treeBuilder) enterArray() {
@@ -175,13 +160,17 @@ func (b *treeBuilder) exitArray() {
 		for i, v := range b.array {
 			tomlArray[i] = v.(*Tree)
 		}
-		b.assignTree.values[b.assignKeyVal] = tomlArray
+		b.assignTree.values[b.assignKey] = tomlArray
 		return
 	}
-	b.assignTree.values[b.assignKeyVal] = &tomlValue{value: b.array, position: b.assignPosition}
+	b.assignTree.values[b.assignKey] = &tomlValue{value: b.array, position: b.assignPosition}
 	b.inArray = false
 }
 
 func (b *treeBuilder) enterInlineTable() {
 	b.inlineTableTree = newTree()
+}
+
+func (b *treeBuilder) exitInlineTable() {
+
 }

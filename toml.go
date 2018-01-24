@@ -10,6 +10,7 @@ import (
 	"strings"
 )
 
+// TODO combine me with Tree
 type tomlValue struct {
 	value     interface{} // string, int64, uint64, float64, bool, time.Time, [] of any of this list
 	comment   string
@@ -23,12 +24,14 @@ type Tree struct {
 	comment   string
 	commented bool
 	position  Position
+	parent    *Tree // nil if root
 }
 
-func newTree() *Tree {
+func newTree(parent *Tree) *Tree {
 	return &Tree{
 		values:   make(map[string]interface{}),
 		position: Position{},
+		parent:   parent,
 	}
 }
 
@@ -202,7 +205,7 @@ func (t *Tree) SetPathWithComment(keys []string, comment string, commented bool,
 	for _, intermediateKey := range keys[:len(keys)-1] {
 		nextTree, exists := subtree.values[intermediateKey]
 		if !exists {
-			nextTree = newTree()
+			nextTree = newTree(subtree)
 			subtree.values[intermediateKey] = nextTree // add new element here
 		}
 		switch node := nextTree.(type) {
@@ -212,7 +215,7 @@ func (t *Tree) SetPathWithComment(keys []string, comment string, commented bool,
 			// go to most recent element
 			if len(node) == 0 {
 				// create element if it does not exist
-				subtree.values[intermediateKey] = append(node, newTree())
+				subtree.values[intermediateKey] = append(node, newTree(subtree))
 			}
 			subtree = node[len(node)-1]
 		}
@@ -244,13 +247,13 @@ func (t *Tree) SetPathWithComment(keys []string, comment string, commented bool,
 // e.g. passing a.b.c will create (assuming tree is empty) tree[a], tree[a][b]
 // and tree[a][b][c]
 //
-// Returns nil on success, error object on failure
-func (t *Tree) createSubTree(keys []string, pos Position) error {
+// Returns a pointer to the created tree on success, error object on failure
+func (t *Tree) createSubTree(keys []string, pos Position) (*Tree, error) {
 	subtree := t
 	for _, intermediateKey := range keys {
 		nextTree, exists := subtree.values[intermediateKey]
 		if !exists {
-			tree := newTree()
+			tree := newTree(subtree)
 			tree.position = pos
 			subtree.values[intermediateKey] = tree
 			nextTree = tree
@@ -262,11 +265,10 @@ func (t *Tree) createSubTree(keys []string, pos Position) error {
 		case *Tree:
 			subtree = node
 		default:
-			return fmt.Errorf("unknown type for path %s (%s): %T (%#v)",
-				strings.Join(keys, "."), intermediateKey, nextTree, nextTree)
+			return nil, fmt.Errorf("unknown type for path %s (%s): %T (%#v)", strings.Join(keys, "."), intermediateKey, nextTree, nextTree)
 		}
 	}
-	return nil
+	return subtree, nil
 }
 
 // LoadBytes creates a Tree from a []byte.

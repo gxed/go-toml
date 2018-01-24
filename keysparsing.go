@@ -13,7 +13,7 @@ import (
 // The input supports double quotation to allow "." inside the key name,
 // but escape sequences are not supported. Lexers must unescape them beforehand.
 func parseKey(key string) ([]string, error) {
-	groups := []string{}
+	var groups []string
 	var buffer bytes.Buffer
 	inQuotes := false
 	wasInQuotes := false
