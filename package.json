@@ -1,0 +1,15 @@
+{
+  "author": "dignifiedquire",
+  "bugs": {
+    "url": "https://github.com/pelletier/go-toml/issues"
+  },
+  "gx": {
+    "dvcsimport": "github.com/gxed/go-toml"
+  },
+  "gxVersion": "0.12.1",
+  "language": "go",
+  "license": "MIT",
+  "name": "go-toml",
+  "releaseCmd": "git commit -a -m \"gx publish $VERSION\"",
+  "version": "1.1.0"
+}
